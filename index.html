@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Custom Quality Policies – Client App</title>
+
+    <!-- Tailwind (for quick styling; no build step) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Import Map: load ESM builds from CDNs so we can keep app.js small and modular -->
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@18.2.0",
+          "react-dom": "https://esm.sh/react-dom@18.2.0",
+          "framer-motion": "https://esm.sh/framer-motion@11.11.1",
+          "lucide-react": "https://esm.sh/lucide-react@0.456.0",
+          "purecloud-platform-client-v2": "https://esm.sh/purecloud-platform-client-v2@203.0.0"
+        }
+      }
+    </script>
+
+    <!-- Optional: Genesys Cloud SDK UMD fallback (exposes window.platformClient). app.js will detect either ESM or UMD. -->
+    <script defer src="https://unpkg.com/purecloud-platform-client-v2/dist/purecloud-platform-client-v2.min.js"></script>
+
+    <style>
+      html, body, #root { height: 100%; }
+    </style>
+  </head>
+  <body class="bg-gray-50 text-gray-900">
+    <div id="root" class="min-h-full">
+      <!-- Loading state shown before app.js mounts React -->
+      <div class="h-screen flex items-center justify-center">
+        <div class="text-center">
+          <div class="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-gray-900 mx-auto"></div>
+          <p class="mt-3 text-sm text-gray-600">Loading app…</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Your application code will live in app.js (next step). -->
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
