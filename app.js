@@ -2,28 +2,35 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { motion } from "framer-motion";
 import { ChevronRight, ChevronLeft, LogIn, Loader2, ShieldCheck, X } from "lucide-react";
-import * as platformClient from "purecloud-platform-client-v2";
 
 /*********************
- * Minimal 2-step app *
- * Step 1: Login (Client ID + Region)
- * Step 2: Criteria builder (with lookups)
+ * Minimal 2-step app (no SDK)
+ * Step 1: Login (Client ID + Region) via OAuth Implicit Grant redirect
+ * Step 2: Criteria builder (with live lookups via fetch + Bearer token)
+ *
+ * This uses the pattern we used on previous client apps: build the
+ * authorize URL, redirect, parse the access_token from the URL hash,
+ * store it in sessionStorage, and call the APIs with fetch.
  *********************/
 
-// -------------------- SDK + API helpers --------------------
-let GC_BASE = "";
-let GC_TOKEN = "";
+// -------------------- Auth + API helpers (no SDK) --------------------
+let GC_TOKEN = sessionStorage.getItem("gc_token") || "";
+let GC_REGION = sessionStorage.getItem("gc_region") || ""; // e.g. mypurecloud.ie
 
-async function sdkLoginImplicitGrant(clientId, region){
-  const client = platformClient.ApiClient.instance;
-  GC_BASE = `https://api.${region}`;
-  client.setEnvironment(region);
-  client.setPersistSettings(true, "custom-quality-policy");
-  const redirectUri = window.location.origin + window.location.pathname; // SPA-friendly
-  await client.loginImplicitGrant(clientId, redirectUri, { state: "qpw" });
-  GC_TOKEN = client.authData.accessToken;
-  const me = await apiFetch("/api/v2/users/me");
-  return me; // {id, name, email, ...}
+function setToken(token){
+  GC_TOKEN = token || "";
+  if (token) sessionStorage.setItem("gc_token", token);
+  else sessionStorage.removeItem("gc_token");
+}
+function setRegion(region){
+  GC_REGION = region || "";
+  if (region) sessionStorage.setItem("gc_region", region);
+  else sessionStorage.removeItem("gc_region");
+}
+
+function apiBase(){
+  if (!GC_REGION) throw new Error("Region not set");
+  return `https://api.${GC_REGION}`;
 }
 
 function buildUrl(path, query){
@@ -34,10 +41,11 @@ function buildUrl(path, query){
     else q.append(k, String(v));
   });
   const qs = q.toString();
-  return `${GC_BASE}${path}${qs ? `?${qs}` : ""}`;
+  return `${apiBase()}${path}${qs ? `?${qs}` : ""}`;
 }
 
 async function apiFetch(path, init){
+  if (!GC_TOKEN) throw new Error("Not authenticated");
   const res = await fetch(buildUrl(path), {
     ...init,
     headers: {
@@ -69,7 +77,36 @@ async function getAllPages(path, params = {}, maxPages = 50){
   return out;
 }
 
-// Lookups
+function parseAuthHash(hash){
+  if (!hash || hash.length < 2) return null;
+  if (hash[0] === '#') hash = hash.slice(1);
+  const p = new URLSearchParams(hash);
+  const accessToken = p.get('access_token');
+  if (!accessToken) return null;
+  return {
+    accessToken,
+    tokenType: p.get('token_type'),
+    expiresIn: Number(p.get('expires_in') || 0),
+    state: p.get('state') || ''
+  };
+}
+
+function stripHash(){
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+}
+
+function buildAuthorizeUrl({ clientId, region, redirectUri, state }){
+  const base = `https://login.${region}/oauth/authorize`;
+  const qs = new URLSearchParams({
+    response_type: 'token',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state
+  });
+  return `${base}?${qs}`;
+}
+
+// -------------------- Lookups --------------------
 async function fetchUsers(){
   const entities = await getAllPages("/api/v2/users", { state: "active", pageSize: 100 });
   return entities.map(u => ({ id: u.id, label: u.name || u.username || u.id }));
@@ -200,8 +237,33 @@ function MultiSelect({ label, options, value, onChange, placeholder="Type to sea
 // -------------------- Screens --------------------
 function SplashLogin({ onLogin }){
   const [clientId, setClientId] = useState("");
-  const [region, setRegion] = useState("mypurecloud.com");
+  const [region, setRegionLocal] = useState(GC_REGION || "mypurecloud.com");
   const [loading, setLoading] = useState(false);
+  const [me, setMe] = useState(null);
+
+  // On load, parse token from hash (implicit grant redirect)
+  useEffect(() => {
+    const parsed = parseAuthHash(location.hash);
+    if (parsed && parsed.accessToken) {
+      setToken(parsed.accessToken);
+      // Region is encoded in state as "qpw|<region>"
+      if (parsed.state && parsed.state.startsWith('qpw|')) {
+        const r = parsed.state.split('|')[1];
+        if (r) { setRegion(r); setRegionLocal(r); }
+      }
+      stripHash();
+      // Try to fetch current user
+      (async () => {
+        try {
+          const me = await apiFetch('/api/v2/users/me');
+          setMe(me);
+          onLogin({ me });
+        } catch (e) {
+          console.warn('Could not fetch /me after login:', e);
+        }
+      })();
+    }
+  }, []);
 
   return (
     <div className="max-w-xl mx-auto bg-white rounded-2xl shadow p-8">
@@ -214,17 +276,17 @@ function SplashLogin({ onLogin }){
       <input className="w-full border rounded-md p-2 mt-1 mb-4" value={clientId} onChange={(e)=> setClientId(e.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
 
       <label className="block text-sm font-medium">Region</label>
-      <RegionSelect region={region} setRegion={setRegion} />
+      <RegionSelect region={region} setRegion={setRegionLocal} />
 
       <button
         disabled={!clientId || loading}
         onClick={async ()=>{
-          setLoading(true);
           try {
-            const me = await sdkLoginImplicitGrant(clientId.trim(), region);
-            onLogin({ me, region });
-          } catch (e){
-            alert(`Login failed: ${e?.message || e}`);
+            setLoading(true);
+            setRegion(region); // persist
+            const redirectUri = window.location.origin + window.location.pathname; // SPA-friendly
+            const authUrl = buildAuthorizeUrl({ clientId: clientId.trim(), region, redirectUri, state: `qpw|${region}` });
+            window.location.assign(authUrl);
           } finally { setLoading(false); }
         }}
         className="mt-6 w-full inline-flex items-center justify-center gap-2 bg-black text-white rounded-md py-2"
@@ -232,7 +294,7 @@ function SplashLogin({ onLogin }){
         {loading ? <Loader2 className="w-4 h-4 animate-spin"/> : <LogIn className="w-4 h-4"/>}
         Sign in
       </button>
-      <p className="mt-3 text-xs text-gray-500 flex items-center gap-1 justify-center"><ShieldCheck className="w-3 h-3"/> OAuth via Platform Client SDK</p>
+      <p className="mt-3 text-xs text-gray-500 flex items-center gap-1 justify-center"><ShieldCheck className="w-3 h-3"/> OAuth implicit grant (no SDK)</p>
     </div>
   );
 }
@@ -359,10 +421,25 @@ function App(){
       setLookups({ users, queues, skills, languages, workTeams, wrapUps, topics, categories });
     } catch (e) {
       console.warn("Lookup load failed:", e);
-      // Soft fallback: keep lookups empty rather than throwing
       setLookups({ users:[], queues:[], skills:[], languages:[], workTeams:[], wrapUps:[], topics:[], categories:[] });
     } finally { setLoadingLookups(false); }
   }
+
+  useEffect(() => {
+    // If token & region are already present (e.g., returning from OAuth), auto-fetch /me and go to step 2
+    if (GC_TOKEN && GC_REGION && !me) {
+      (async () => {
+        try {
+          const profile = await apiFetch('/api/v2/users/me');
+          setMe(profile);
+          setStep(2);
+          loadLookups();
+        } catch (e) {
+          console.warn('Existing token invalid:', e);
+        }
+      })();
+    }
+  }, []);
 
   return (
     <div className="max-w-6xl mx-auto p-6">
